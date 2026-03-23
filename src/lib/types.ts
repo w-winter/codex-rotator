@@ -63,6 +63,20 @@ export type SyncCurrentResponse = {
   created: boolean;
 };
 
+export type LimitRefreshJob = {
+  jobId: string;
+  status: "running" | "completed";
+  total: number;
+  completed: number;
+  failed: number;
+  startedAt: string;
+  finishedAt: string | null;
+  errors: Array<{
+    alias: string;
+    message: string;
+  }>;
+};
+
 export type OauthFlowStartResponse = {
   flowId: string;
   alias: string;

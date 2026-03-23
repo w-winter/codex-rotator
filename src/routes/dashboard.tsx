@@ -6,10 +6,12 @@ import { toast } from "sonner";
 import {
   activateAccount,
   deleteAccount,
+  fetchBulkLimitRefreshStatus,
   fetchDashboardState,
   fetchOauthStatus,
   refreshAccountLimits,
   refreshAccountTokens,
+  startBulkLimitRefresh,
   startOauthAccount,
   syncCurrentAccount,
 } from "@/lib/api";
@@ -18,6 +20,7 @@ import type {
   AccountSummary,
   DashboardState,
   LimitWindow,
+  LimitRefreshJob,
   OauthFlowStartResponse,
 } from "@/lib/types";
 import { AccordionCard, useAccordionCardState } from "@/components/ui/accordion-card";
@@ -855,6 +858,7 @@ export function AccountsPage() {
   const [pendingAlias, setPendingAlias] = useState("");
   const [search, setSearch] = useState("");
   const [oauthFlow, setOauthFlow] = useState<OauthFlowStartResponse | null>(null);
+  const [limitRefreshJob, setLimitRefreshJob] = useState<LimitRefreshJob | null>(null);
   const oauthPopupRef = useRef<Window | null>(null);
 
   const { currentAccount, recommendedAccount } = PageState({
@@ -868,6 +872,16 @@ export function AccountsPage() {
     refetchInterval: (query) => {
       if (!oauthFlow) return false;
       return query.state.data?.status === "pending" || query.state.data == null ? 1_000 : false;
+    },
+  });
+
+  const limitRefreshStatusQuery = useQuery({
+    queryKey: ["limit-refresh-job", limitRefreshJob?.jobId],
+    queryFn: () => fetchBulkLimitRefreshStatus(limitRefreshJob!.jobId),
+    enabled: Boolean(limitRefreshJob?.jobId),
+    refetchInterval: (query) => {
+      if (!limitRefreshJob) return false;
+      return query.state.data?.status === "running" || query.state.data == null ? 1_000 : false;
     },
   });
 
@@ -930,10 +944,19 @@ export function AccountsPage() {
   });
 
   const refreshLimitsMutation = useMutation({
-    mutationFn: (alias?: string) => refreshAccountLimits(alias),
+    mutationFn: (alias: string) => refreshAccountLimits(alias),
     onSuccess: () => {
       toast.success("Limit refresh completed");
       queryClient.invalidateQueries({ queryKey: ["dashboard-state"] });
+    },
+    onError: (error) => toast.error(error.message),
+  });
+
+  const bulkRefreshLimitsMutation = useMutation({
+    mutationFn: () => startBulkLimitRefresh(),
+    onSuccess: (job) => {
+      setLimitRefreshJob(job);
+      toast.message(`Refreshing ${job.total} accounts in the background.`);
     },
     onError: (error) => toast.error(error.message),
   });
@@ -975,6 +998,22 @@ export function AccountsPage() {
       oauthPopupRef.current = null;
     }
   }, [oauthFlow, oauthStatusQuery.data, queryClient]);
+
+  useEffect(() => {
+    const job = limitRefreshStatusQuery.data;
+    if (!job) return;
+
+    setLimitRefreshJob(job);
+    queryClient.invalidateQueries({ queryKey: ["dashboard-state"] });
+
+    if (job.status === "completed") {
+      toast.success(
+        job.failed > 0
+          ? `Limit refresh finished with ${job.failed} issue${job.failed === 1 ? "" : "s"}`
+          : "Limit refresh completed",
+      );
+    }
+  }, [limitRefreshStatusQuery.data, queryClient]);
 
   useEffect(() => {
     return () => {
@@ -1084,8 +1123,8 @@ export function AccountsPage() {
               </Button>
               <Button
                 variant="mutedBordered"
-                onClick={() => refreshLimitsMutation.mutate(undefined)}
-                disabled={refreshLimitsMutation.isPending}
+                onClick={() => bulkRefreshLimitsMutation.mutate()}
+                disabled={bulkRefreshLimitsMutation.isPending || limitRefreshJob?.status === "running"}
               >
                 Refresh limits (all)
               </Button>
@@ -1094,6 +1133,12 @@ export function AccountsPage() {
                 Refresh UI
               </Button>
             </div>
+
+            {limitRefreshJob?.status === "running" ? (
+              <div className="text-xs text-muted-foreground">
+                Refreshing {limitRefreshJob.completed}/{limitRefreshJob.total} accounts...
+              </div>
+            ) : null}
 
             <div className="flex items-center gap-2">
               <Input

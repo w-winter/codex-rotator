@@ -1,4 +1,9 @@
-import { OPENAI_AUTH_BASE_URL, OPENAI_OAUTH_CLIENT_ID, OPENAI_USAGE_URL } from "./config.js";
+import {
+  OPENAI_AUTH_BASE_URL,
+  OPENAI_OAUTH_CLIENT_ID,
+  OPENAI_REQUEST_TIMEOUT_MS,
+  OPENAI_USAGE_URL,
+} from "./config.js";
 import { applyTokenRefresh, readStoredTokens } from "./auth-file.js";
 import type {
   CreditsRecord,
@@ -25,6 +30,25 @@ function decodeJwtPayload(token: string) {
     return JSON.parse(Buffer.from(padded, "base64").toString("utf8")) as Record<string, unknown>;
   } catch {
     return null;
+  }
+}
+
+async function fetchWithTimeout(
+  input: string,
+  init: RequestInit,
+  label: string,
+) {
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: AbortSignal.timeout(OPENAI_REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "TimeoutError") {
+      throw new Error(`${label} timed out after ${Math.round(OPENAI_REQUEST_TIMEOUT_MS / 1000)}s`);
+    }
+
+    throw error;
   }
 }
 
@@ -98,12 +122,16 @@ function extractRefreshMetadata(idToken: string, accessToken: string) {
 
 async function fetchUserInfoEmail(accessToken: string) {
   try {
-    const response = await fetch(`${OPENAI_AUTH_BASE_URL}/userinfo`, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Accept: "application/json",
+    const response = await fetchWithTimeout(
+      `${OPENAI_AUTH_BASE_URL}/userinfo`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json",
+        },
       },
-    });
+      "User info request",
+    );
 
     if (!response.ok) return null;
     const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
@@ -122,20 +150,24 @@ export async function exchangeAuthorizationCode({
   codeVerifier: string;
   redirectUri: string;
 }): Promise<TokenRefreshResult> {
-  const response = await fetch(`${OPENAI_AUTH_BASE_URL}/oauth/token`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "application/json",
+  const response = await fetchWithTimeout(
+    `${OPENAI_AUTH_BASE_URL}/oauth/token`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        client_id: OPENAI_OAUTH_CLIENT_ID,
+        code,
+        code_verifier: codeVerifier,
+        redirect_uri: redirectUri,
+      }),
     },
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      client_id: OPENAI_OAUTH_CLIENT_ID,
-      code,
-      code_verifier: codeVerifier,
-      redirect_uri: redirectUri,
-    }),
-  });
+    "OAuth token exchange",
+  );
 
   const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
   if (!response.ok || !payload) {
@@ -168,19 +200,23 @@ export async function exchangeAuthorizationCode({
 
 export async function refreshStoredAccount(account: StoredAccount) {
   const { refreshToken } = readStoredTokens(account);
-  const response = await fetch(`${OPENAI_AUTH_BASE_URL}/oauth/token`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
+  const response = await fetchWithTimeout(
+    `${OPENAI_AUTH_BASE_URL}/oauth/token`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        grant_type: "refresh_token",
+        client_id: OPENAI_OAUTH_CLIENT_ID,
+        refresh_token: refreshToken,
+        scope: "openid profile email",
+      }),
     },
-    body: JSON.stringify({
-      grant_type: "refresh_token",
-      client_id: OPENAI_OAUTH_CLIENT_ID,
-      refresh_token: refreshToken,
-      scope: "openid profile email",
-    }),
-  });
+    `Token refresh for ${account.alias}`,
+  );
 
   const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
   if (!response.ok || !payload) {
@@ -226,7 +262,11 @@ export async function fetchUsageForAccount(account: StoredAccount): Promise<Usag
     headers["ChatGPT-Account-Id"] = accountId;
   }
 
-  const response = await fetch(OPENAI_USAGE_URL, { headers });
+  const response = await fetchWithTimeout(
+    OPENAI_USAGE_URL,
+    { headers },
+    `Usage request for ${account.alias}`,
+  );
   const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
 
   if (!response.ok || !payload) {

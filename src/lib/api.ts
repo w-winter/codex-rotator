@@ -1,5 +1,6 @@
 import type {
   DashboardState,
+  LimitRefreshJob,
   OauthFlowStartResponse,
   OauthFlowStatusResponse,
   SyncCurrentResponse,
@@ -87,11 +88,22 @@ export function activateAccount(alias: string) {
   });
 }
 
-export function refreshAccountLimits(alias?: string) {
+export function refreshAccountLimits(alias: string) {
   return request<DashboardState>("/api/accounts/refresh-limits", {
     method: "POST",
     body: JSON.stringify({ alias }),
   });
+}
+
+export function startBulkLimitRefresh() {
+  return request<LimitRefreshJob>("/api/accounts/refresh-limits", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export function fetchBulkLimitRefreshStatus(jobId: string) {
+  return request<LimitRefreshJob>(`/api/accounts/refresh-limits/status/${jobId}`);
 }
 
 export function refreshAccountTokens(alias?: string) {

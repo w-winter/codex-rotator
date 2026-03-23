@@ -2,6 +2,7 @@ import express from "express";
 import type { Server as HttpServer } from "node:http";
 import path from "node:path";
 import fs from "node:fs/promises";
+import crypto from "node:crypto";
 
 import {
   buildExtractedAuthFromTokens,
@@ -11,6 +12,7 @@ import {
 } from "./lib/auth-file.js";
 import {
   CODEX_AUTH_PATH,
+  MAX_PARALLEL_ACCOUNT_REFRESH,
   OPENAI_OAUTH_CALLBACK_PORT,
   SERVER_HOST,
   SERVER_PORT,
@@ -38,10 +40,57 @@ const isProduction = process.env.NODE_ENV === "production";
 const distDir = path.resolve(process.cwd(), "dist");
 let oauthCallbackListener: HttpServer | null = null;
 let oauthCallbackListenerPromise: Promise<void> | null = null;
+type LimitRefreshJob = {
+  jobId: string;
+  status: "running" | "completed";
+  total: number;
+  completed: number;
+  failed: number;
+  startedAt: string;
+  finishedAt: string | null;
+  errors: Array<{
+    alias: string;
+    message: string;
+  }>;
+};
+
+const limitRefreshJobs = new Map<string, LimitRefreshJob>();
+let activeLimitRefreshJobId: string | null = null;
 
 app.disable("x-powered-by");
 app.use(express.json({ limit: "1mb" }));
 app.use(localOnlyMiddleware);
+
+function toPublicLimitRefreshJob(job: LimitRefreshJob) {
+  return {
+    jobId: job.jobId,
+    status: job.status,
+    total: job.total,
+    completed: job.completed,
+    failed: job.failed,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    errors: job.errors,
+  };
+}
+
+function pruneLimitRefreshJobs() {
+  if (limitRefreshJobs.size <= 10) return;
+
+  const completedJobs = [...limitRefreshJobs.values()]
+    .filter((job) => job.status === "completed")
+    .sort((left, right) => {
+      const leftTime = left.finishedAt ? new Date(left.finishedAt).getTime() : 0;
+      const rightTime = right.finishedAt ? new Date(right.finishedAt).getTime() : 0;
+      return leftTime - rightTime;
+    });
+
+  while (limitRefreshJobs.size > 10 && completedJobs.length > 0) {
+    const oldest = completedJobs.shift();
+    if (!oldest) break;
+    limitRefreshJobs.delete(oldest.jobId);
+  }
+}
 
 async function ensureOauthCallbackListener() {
   if (oauthCallbackListener) return;
@@ -347,12 +396,27 @@ async function refreshUsageWithAutoTokenRefresh(account: StoredAccount) {
     const shouldRetry = message.includes("(401)") || message.includes("(403)");
 
     if (shouldRetry) {
-      await refreshStoredAccount(account);
-      const usage = await fetchUsageForAccount(account);
-      account.usage = usage;
-      account.lastLimitRefreshAt = usage.fetchedAt;
-      account.planType = usage.planType ?? account.planType;
-      return;
+      try {
+        await refreshStoredAccount(account);
+        const usage = await fetchUsageForAccount(account);
+        account.usage = usage;
+        account.lastLimitRefreshAt = usage.fetchedAt;
+        account.planType = usage.planType ?? account.planType;
+        return;
+      } catch (retryError) {
+        const retryMessage =
+          retryError instanceof Error ? retryError.message : "Usage refresh failed after token refresh";
+        account.usage = {
+          planType: account.planType,
+          rateLimit: account.usage?.rateLimit ?? null,
+          codeReviewRateLimit: account.usage?.codeReviewRateLimit ?? null,
+          credits: account.usage?.credits ?? null,
+          fetchedAt: new Date().toISOString(),
+          error: retryMessage,
+        };
+        account.lastLimitRefreshAt = account.usage.fetchedAt;
+        return;
+      }
     }
 
     const failedUsage: UsageRecord = {
@@ -366,6 +430,118 @@ async function refreshUsageWithAutoTokenRefresh(account: StoredAccount) {
     account.usage = failedUsage;
     account.lastLimitRefreshAt = failedUsage.fetchedAt;
   }
+}
+
+async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+) {
+  const limit = Math.max(1, Math.min(concurrency, items.length));
+  let nextIndex = 0;
+
+  const runners = Array.from({ length: limit }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      await worker(items[currentIndex]!);
+    }
+  });
+
+  await Promise.all(runners);
+}
+
+function getLimitRefreshJob(jobId: string) {
+  pruneLimitRefreshJobs();
+  const job = limitRefreshJobs.get(jobId);
+  return job ? toPublicLimitRefreshJob(job) : null;
+}
+
+async function runLimitRefreshJob(job: LimitRefreshJob) {
+  const store = await loadStore();
+  const targets = [...store.accounts];
+  let saveQueue = Promise.resolve();
+
+  const queueSave = () => {
+    saveQueue = saveQueue.then(() => saveStore(store));
+    return saveQueue;
+  };
+
+  await runWithConcurrency(targets, MAX_PARALLEL_ACCOUNT_REFRESH, async (account) => {
+    try {
+      await refreshUsageWithAutoTokenRefresh(account);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Limit refresh failed";
+      job.failed += 1;
+      job.errors.push({
+        alias: account.alias,
+        message,
+      });
+      account.usage = {
+        planType: account.planType,
+        rateLimit: account.usage?.rateLimit ?? null,
+        codeReviewRateLimit: account.usage?.codeReviewRateLimit ?? null,
+        credits: account.usage?.credits ?? null,
+        fetchedAt: new Date().toISOString(),
+        error: message,
+      };
+      account.lastLimitRefreshAt = account.usage.fetchedAt;
+    } finally {
+      job.completed += 1;
+      store.lastSyncedAt = new Date().toISOString();
+      await queueSave();
+    }
+  });
+
+  await saveQueue;
+  job.status = "completed";
+  job.finishedAt = new Date().toISOString();
+  activeLimitRefreshJobId = null;
+  pruneLimitRefreshJobs();
+}
+
+async function startLimitRefreshJob() {
+  pruneLimitRefreshJobs();
+
+  if (activeLimitRefreshJobId) {
+    const activeJob = limitRefreshJobs.get(activeLimitRefreshJobId);
+    if (activeJob) {
+      return toPublicLimitRefreshJob(activeJob);
+    }
+  }
+
+  const store = await loadStore();
+  if (store.accounts.length === 0) {
+    return null;
+  }
+
+  const job: LimitRefreshJob = {
+    jobId: crypto.randomUUID(),
+    status: "running",
+    total: store.accounts.length,
+    completed: 0,
+    failed: 0,
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    errors: [],
+  };
+
+  limitRefreshJobs.set(job.jobId, job);
+  activeLimitRefreshJobId = job.jobId;
+
+  void runLimitRefreshJob(job).catch((error) => {
+    job.failed = Math.max(job.failed, job.total - job.completed);
+    job.status = "completed";
+    job.finishedAt = new Date().toISOString();
+    job.errors.push({
+      alias: "system",
+      message: error instanceof Error ? error.message : "Bulk limit refresh crashed",
+    });
+    activeLimitRefreshJobId = null;
+    pruneLimitRefreshJobs();
+  });
+
+  return toPublicLimitRefreshJob(job);
 }
 
 app.get("/api/health", (_req, res) => {
@@ -580,9 +756,9 @@ app.post("/api/accounts/refresh-tokens", async (req, res) => {
     return;
   }
 
-  for (const account of targets) {
+  await runWithConcurrency(targets, MAX_PARALLEL_ACCOUNT_REFRESH, async (account) => {
     await refreshStoredAccount(account);
-  }
+  });
 
   await saveStore(store);
   const currentAuth = await resolveCurrentAuth();
@@ -591,21 +767,42 @@ app.post("/api/accounts/refresh-tokens", async (req, res) => {
 
 app.post("/api/accounts/refresh-limits", async (req, res) => {
   const alias = normalizeAlias(req.body?.alias);
+  if (!alias) {
+    const job = await startLimitRefreshJob();
+    if (!job) {
+      res.status(404).json({ error: "No matching accounts found" });
+      return;
+    }
+
+    res.status(202).json(job);
+    return;
+  }
+
   const store = await loadStore();
-  const targets = alias ? store.accounts.filter((item) => item.alias === alias) : store.accounts;
+  const targets = store.accounts.filter((item) => item.alias === alias);
 
   if (targets.length === 0) {
     res.status(404).json({ error: "No matching accounts found" });
     return;
   }
 
-  for (const account of targets) {
+  await runWithConcurrency(targets, MAX_PARALLEL_ACCOUNT_REFRESH, async (account) => {
     await refreshUsageWithAutoTokenRefresh(account);
-  }
+  });
 
   await saveStore(store);
   const currentAuth = await resolveCurrentAuth();
   res.json(toDashboardState(store, currentAuth));
+});
+
+app.get("/api/accounts/refresh-limits/status/:jobId", (req, res) => {
+  const job = getLimitRefreshJob(req.params.jobId);
+  if (!job) {
+    res.status(404).json({ error: "Refresh job not found" });
+    return;
+  }
+
+  res.json(job);
 });
 
 app.post("/api/accounts/delete", async (req, res) => {

@@ -22,3 +22,9 @@ export const OPENAI_OAUTH_ORIGINATOR =
   process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE || "codex_cli_rs";
 
 export const DEFAULT_NOTIFY_PERCENT = 80;
+export const MAX_PARALLEL_ACCOUNT_REFRESH = Number(
+  process.env.CODEX_SWITCHER_REFRESH_CONCURRENCY || 12,
+);
+export const OPENAI_REQUEST_TIMEOUT_MS = Number(
+  process.env.CODEX_SWITCHER_REQUEST_TIMEOUT_MS || 10_000,
+);
