@@ -8,6 +8,7 @@ It keeps multiple Codex `auth.json` sessions in an encrypted local vault, refres
 
 - Stores multiple ChatGPT/Codex account sessions locally in an encrypted vault
 - Adds accounts through the first-party OAuth flow
+- Keeps same-email accounts separate when they belong to different subscription/account contexts
 - Reads exact primary and weekly usage windows per account
 - Marks the account that is currently active in Codex
 - Recommends the healthiest next account based on refreshed usage data

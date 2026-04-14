@@ -159,6 +159,7 @@ function getMatchingAccount(
   fingerprint: string,
   email: string | null,
   accountId: string | null,
+  planType: string | null,
 ) {
   const fingerprintMatch = store.accounts.find((account) => account.fingerprint === fingerprint);
   if (fingerprintMatch) {
@@ -191,15 +192,11 @@ function getMatchingAccount(
       account.accountId &&
       accountId &&
       account.accountId === accountId &&
-      (!account.email || !email || account.email === email),
+      (!account.email || !email || account.email === email) &&
+      (!account.planType || !planType || account.planType === planType),
   );
   if (accountIdMatch) {
     return { account: accountIdMatch, reason: "accountId" as const };
-  }
-
-  const emailMatch = store.accounts.find((account) => account.email && email && account.email === email);
-  if (emailMatch) {
-    return { account: emailMatch, reason: "email" as const };
   }
 
   return null;
@@ -243,7 +240,7 @@ function upsertAccount(
   preferredAlias: string,
   options?: { preserveExistingAlias?: boolean },
 ) {
-  const match = getMatchingAccount(store, auth.fingerprint, auth.email, auth.accountId);
+  const match = getMatchingAccount(store, auth.fingerprint, auth.email, auth.accountId, auth.planType);
   const existing = match?.account ?? null;
 
   if (existing) {
@@ -310,6 +307,7 @@ function toDashboardState(store: StoreFile, currentAuth: ExtractedAuth | null) {
         currentAuth.fingerprint,
         currentAuth.email,
         currentAuth.accountId,
+        currentAuth.planType,
       )?.account ?? null
     : null;
   const recommended = recommendedAlias(store);
@@ -565,7 +563,13 @@ app.post("/api/sync-current", async (req, res) => {
 
   const store = await loadStore();
   const current = await readCurrentAuthFile();
-  const matched = getMatchingAccount(store, current.fingerprint, current.email, current.accountId);
+  const matched = getMatchingAccount(
+    store,
+    current.fingerprint,
+    current.email,
+    current.accountId,
+    current.planType,
+  );
 
   if (
     aliasInput &&
