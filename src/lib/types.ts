@@ -88,7 +88,7 @@ export type OauthFlowStartResponse = {
   accountAlias: string | null;
   email: string | null;
   created: boolean | null;
-  matchReason: "fingerprint" | "accountId" | "email" | null;
+  matchReason: "fingerprint" | "accountId" | null;
 };
 
 export type OauthFlowStatusResponse = OauthFlowStartResponse;

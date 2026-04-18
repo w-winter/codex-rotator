@@ -24,7 +24,7 @@ type OauthFlowRecord = {
   accountAlias: string | null;
   email: string | null;
   created: boolean | null;
-  matchReason: "fingerprint" | "accountId" | "email" | null;
+  matchReason: "fingerprint" | "accountId" | null;
 };
 
 const FLOW_TTL_MS = 15 * 60 * 1000;
@@ -143,7 +143,7 @@ export function markOauthFlowSuccess(
     accountAlias: string;
     email: string | null;
     created: boolean;
-    matchReason: "fingerprint" | "accountId" | "email" | null;
+    matchReason: "fingerprint" | "accountId" | null;
   },
 ) {
   const flow = flowsById.get(flowId);

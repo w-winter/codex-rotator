@@ -46,11 +46,21 @@ export type StoredAccount = {
   usage: UsageRecord | null;
 };
 
+export type RotationPolicy = {
+  preferredAliases: string[];
+  reserveAliases: string[];
+  heavyRun: {
+    maxPrimaryUsedPercent: number;
+    maxWeeklyUsedPercent: number;
+  };
+};
+
 export type StoreFile = {
   version: 1;
   thresholds: {
     notifyPercent: number;
   };
+  rotationPolicy: RotationPolicy;
   lastSyncedAt: string | null;
   accounts: StoredAccount[];
 };

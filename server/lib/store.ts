@@ -2,8 +2,15 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import { APP_HOME, DEFAULT_NOTIFY_PERCENT, KEY_PATH, STORE_PATH } from "./config.js";
-import type { StoreFile } from "./types.js";
+import {
+  APP_HOME,
+  DEFAULT_NOTIFY_PERCENT,
+  DEFAULT_ROTATION_MAX_PRIMARY_USED_PERCENT,
+  DEFAULT_ROTATION_MAX_WEEKLY_USED_PERCENT,
+  KEY_PATH,
+  STORE_PATH,
+} from "./config.js";
+import type { RotationPolicy, StoreFile } from "./types.js";
 
 type EncryptedPayload = {
   version: number;
@@ -12,14 +19,78 @@ type EncryptedPayload = {
   data: string;
 };
 
+function createDefaultRotationPolicy(): RotationPolicy {
+  return {
+    preferredAliases: [],
+    reserveAliases: [],
+    heavyRun: {
+      maxPrimaryUsedPercent: DEFAULT_ROTATION_MAX_PRIMARY_USED_PERCENT,
+      maxWeeklyUsedPercent: DEFAULT_ROTATION_MAX_WEEKLY_USED_PERCENT,
+    },
+  };
+}
+
 function createEmptyStore(): StoreFile {
   return {
     version: 1,
     thresholds: {
       notifyPercent: DEFAULT_NOTIFY_PERCENT,
     },
+    rotationPolicy: createDefaultRotationPolicy(),
     lastSyncedAt: null,
     accounts: [],
+  };
+}
+
+function normalizePercent(value: unknown, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function normalizeRotationPolicy(input: unknown): RotationPolicy {
+  const defaults = createDefaultRotationPolicy();
+  const candidate = input && typeof input === "object" ? (input as Partial<RotationPolicy>) : null;
+  const heavyRun = candidate?.heavyRun && typeof candidate.heavyRun === "object"
+    ? candidate.heavyRun
+    : null;
+
+  return {
+    preferredAliases: Array.isArray(candidate?.preferredAliases)
+      ? candidate.preferredAliases.filter((alias): alias is string => typeof alias === "string")
+      : defaults.preferredAliases,
+    reserveAliases: Array.isArray(candidate?.reserveAliases)
+      ? candidate.reserveAliases.filter((alias): alias is string => typeof alias === "string")
+      : defaults.reserveAliases,
+    heavyRun: {
+      maxPrimaryUsedPercent: normalizePercent(
+        heavyRun && "maxPrimaryUsedPercent" in heavyRun ? heavyRun.maxPrimaryUsedPercent : null,
+        defaults.heavyRun.maxPrimaryUsedPercent,
+      ),
+      maxWeeklyUsedPercent: normalizePercent(
+        heavyRun && "maxWeeklyUsedPercent" in heavyRun ? heavyRun.maxWeeklyUsedPercent : null,
+        defaults.heavyRun.maxWeeklyUsedPercent,
+      ),
+    },
+  };
+}
+
+function normalizeStore(input: unknown): StoreFile {
+  const defaults = createEmptyStore();
+  const candidate = input && typeof input === "object" ? (input as Partial<StoreFile>) : null;
+  const thresholds = candidate?.thresholds && typeof candidate.thresholds === "object"
+    ? candidate.thresholds
+    : null;
+
+  return {
+    version: 1,
+    thresholds: {
+      notifyPercent: normalizePercent(
+        thresholds && "notifyPercent" in thresholds ? thresholds.notifyPercent : null,
+        defaults.thresholds.notifyPercent,
+      ),
+    },
+    rotationPolicy: normalizeRotationPolicy(candidate?.rotationPolicy),
+    lastSyncedAt: typeof candidate?.lastSyncedAt === "string" ? candidate.lastSyncedAt : null,
+    accounts: Array.isArray(candidate?.accounts) ? candidate.accounts : defaults.accounts,
   };
 }
 
@@ -66,7 +137,7 @@ function decryptStore(payload: EncryptedPayload, key: Buffer): StoreFile {
     decipher.final(),
   ]);
 
-  return JSON.parse(decrypted.toString("utf8")) as StoreFile;
+  return normalizeStore(JSON.parse(decrypted.toString("utf8")));
 }
 
 async function atomicWrite(filePath: string, contents: string) {
@@ -90,6 +161,8 @@ export async function loadStore(): Promise<StoreFile> {
 
 export async function saveStore(store: StoreFile) {
   const key = await ensureKey();
-  const payload = encryptStore(store, key);
+  const payload = encryptStore(normalizeStore(store), key);
   await atomicWrite(STORE_PATH, JSON.stringify(payload, null, 2));
 }
+
+export { createDefaultRotationPolicy };
