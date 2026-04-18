@@ -3,15 +3,21 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "codex-rotator": "./bin/codex-rotator.mjs"
+  },
   "scripts": {
     "dev": "concurrently -n api,web -c cyan,magenta \"tsx watch server/index.ts\" \"vite\"",
     "dev:web": "vite",
     "dev:tauri": "tauri dev",
     "build": "vite build",
+    "build:cli": "node scripts/build-cli.mjs",
     "build:sidecar": "node scripts/build-sidecar.mjs",
     "build:tauri": "npm run build:sidecar && tauri build",
     "start": "NODE_ENV=production tsx server/index.ts",
-    "check": "tsc --noEmit"
+    "cli": "tsx server/cli.ts",
+    "check": "tsc --noEmit",
+    "test": "node --import tsx --test \"server/**/*.test.ts\""
   },
   "dependencies": {
     "@iconify/react": "^6.0.2",
