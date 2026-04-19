@@ -1,4 +1,9 @@
-import { getMatchingAccount, recommendedAlias, sortAccountsForDisplay } from "./accounts.js";
+import {
+  accountRequiresReconnect,
+  getMatchingAccount,
+  recommendedAlias,
+  sortAccountsForDisplay,
+} from "./accounts.js";
 import { CODEX_AUTH_PATH, STORE_PATH } from "./config.js";
 import type { ExtractedAuth, StoreFile, StoredAccount } from "./types.js";
 
@@ -14,6 +19,7 @@ export type DashboardAccountState = {
   onDevice: boolean;
   recommended: boolean;
   usageCount: number;
+  requiresReconnect: boolean;
   usage: StoredAccount["usage"];
 };
 
@@ -62,6 +68,7 @@ export function toDashboardState(store: StoreFile, currentAuth: ExtractedAuth | 
       onDevice: currentAccount?.alias === account.alias,
       recommended: account.alias === recommended,
       usageCount: account.usageCount,
+      requiresReconnect: accountRequiresReconnect(account),
       usage: account.usage,
     })),
   };

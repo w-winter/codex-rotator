@@ -11,6 +11,7 @@ import {
   AccountServiceError,
   activateAccountOnDevice,
   deleteStoredAccount,
+  reconnectStoredAccount,
   refreshAccountLimits,
   refreshAccountTokens,
   resolveCurrentAuth,
@@ -192,7 +193,11 @@ function sendJsonError(res: Response, error: unknown) {
       return;
     }
 
-    if (error.code === "ALIAS_CONFLICT" || error.code === "OPERATION_IN_PROGRESS") {
+    if (
+      error.code === "ALIAS_CONFLICT"
+      || error.code === "OPERATION_IN_PROGRESS"
+      || error.code === "REAUTH_ACCOUNT_MISMATCH"
+    ) {
       res.status(409).json({ error: error.message });
       return;
     }
@@ -351,7 +356,34 @@ app.post("/api/oauth/start", async (req, res) => {
     return;
   }
 
-  res.json(startOauthFlow(alias));
+  res.json(startOauthFlow({ alias, intent: "add" }));
+});
+
+app.post("/api/oauth/reconnect", async (req, res) => {
+  const rawAlias = getRawAlias(req.body?.alias) ?? "";
+  const alias = normalizeAlias(rawAlias);
+
+  if (!alias) {
+    res.status(400).json({ error: "Alias is invalid" });
+    return;
+  }
+
+  const store = await loadStore();
+  if (!store.accounts.some((account) => account.alias === alias)) {
+    res.status(404).json({ error: `Stored account '${alias}' was not found` });
+    return;
+  }
+
+  try {
+    await ensureOauthCallbackListener();
+  } catch (error) {
+    res.status(503).json({
+      error: error instanceof Error ? error.message : "OAuth callback listener could not start",
+    });
+    return;
+  }
+
+  res.json(startOauthFlow({ alias, intent: "reconnect" }));
 });
 
 app.get("/api/oauth/status/:flowId", (req, res) => {
@@ -390,7 +422,21 @@ async function handleOauthCallback(req: Request, res: Response) {
       .send(
         renderOauthResultPage({
           title: "OAuth flow expired",
-          detail: "The login flow was not found anymore. Start the OAuth add-account flow again.",
+          detail: "The login flow was not found anymore. Start the OAuth flow again from the dashboard.",
+          error: true,
+        }),
+      );
+    return;
+  }
+
+  if (flow.status !== "pending") {
+    res
+      .status(409)
+      .type("html")
+      .send(
+        renderOauthResultPage({
+          title: "OAuth flow already completed",
+          detail: "This login callback was already used. Start a fresh OAuth flow from the dashboard if you need to try again.",
           error: true,
         }),
       );
@@ -404,16 +450,19 @@ async function handleOauthCallback(req: Request, res: Response) {
       redirectUri: flow.redirectUri,
     });
     const auth = buildExtractedAuthFromTokens(tokens);
-    const result = await storeExtractedAccount({
-      auth,
-      preferredAlias: flow.alias,
-      preserveExistingAlias: true,
-    });
+    const result = flow.intent === "reconnect"
+      ? await reconnectStoredAccount({ alias: flow.alias, auth })
+      : await storeExtractedAccount({
+          auth,
+          preferredAlias: flow.alias,
+          preserveExistingAlias: true,
+        });
 
     console.log(
       "[codex-auth-switcher] OAuth callback result",
       JSON.stringify({
         flowId: flow.id,
+        intent: flow.intent,
         requestedAlias: flow.alias,
         storedAlias: result.alias,
         created: result.created,
@@ -430,14 +479,21 @@ async function handleOauthCallback(req: Request, res: Response) {
     });
     void closeOauthCallbackListenerIfIdle();
 
+    const actionLabel = flow.intent === "reconnect" ? "reconnected" : "added";
+    const actionDetail = flow.intent === "reconnect"
+      ? (auth.email
+          ? `${auth.email} is now refreshed for stored account ${result.alias}.`
+          : `Stored account ${result.alias} is now refreshed.`)
+      : (auth.email
+          ? `${auth.email} is now stored in the local pool.`
+          : "The account is now stored in the local pool.");
+
     res
       .type("html")
       .send(
         renderOauthResultPage({
-          title: `Account ${result.alias} added`,
-          detail: auth.email
-            ? `${auth.email} is now stored in the local pool.`
-            : "The account is now stored in the local pool.",
+          title: `Account ${result.alias} ${actionLabel}`,
+          detail: actionDetail,
         }),
       );
   } catch (error) {

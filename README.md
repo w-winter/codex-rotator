@@ -8,6 +8,7 @@ It keeps multiple Codex `auth.json` sessions in an encrypted local vault, refres
 
 - Stores multiple ChatGPT/Codex account sessions locally in an encrypted vault
 - Adds accounts through the first-party OAuth flow in the dashboard
+- Lets you reconnect an existing stored alias when its refresh token is no longer valid
 - Keeps same-email accounts separate when they belong to different subscription/account contexts
 - Reads exact primary and weekly usage windows per account
 - Marks the account that is currently active in Codex
@@ -210,4 +211,6 @@ git push origin v0.1.0
 - This is an unofficial utility for local account/session management.
 - Usage data availability depends on the upstream ChatGPT/Codex usage endpoints.
 - If a newly added account still looks empty, use `Refresh limits` once to force a fresh read.
+- If an existing stored account is marked as requiring reconnect, use `Reconnect` on that alias in the dashboard instead of `Add account`.
+- Reconnect only succeeds when the browser login resolves to that same stored account identity.
 - OAuth add-account is intentionally not exposed through the CLI in this version.

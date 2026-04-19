@@ -64,6 +64,33 @@ export function getMatchingAccount(
   return null;
 }
 
+function normalizedEmail(value: string | null) {
+  return value?.trim().toLowerCase() ?? null;
+}
+
+export function matchesCanonicalAccountIdentity(account: StoredAccount, auth: ExtractedAuth) {
+  if (!account.accountId || !auth.accountId) {
+    return false;
+  }
+
+  if (account.accountId !== auth.accountId) {
+    return false;
+  }
+
+  const storedEmail = normalizedEmail(account.email);
+  const incomingEmail = normalizedEmail(auth.email);
+
+  if (storedEmail && incomingEmail && storedEmail !== incomingEmail) {
+    return false;
+  }
+
+  return true;
+}
+
+export function accountRequiresReconnect(account: StoredAccount) {
+  return account.usage?.authState === "reconnect-required";
+}
+
 export function nextAlias(store: StoreFile) {
   let index = 1;
   while (store.accounts.some((account) => account.alias === `acc${index}`)) {

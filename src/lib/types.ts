@@ -27,6 +27,7 @@ export type UsageSummary = {
   credits: CreditsSummary | null;
   fetchedAt: string | null;
   error: string | null;
+  authState: "valid" | "unknown" | "reconnect-required";
 };
 
 export type AccountSummary = {
@@ -41,6 +42,7 @@ export type AccountSummary = {
   onDevice: boolean;
   recommended: boolean;
   usageCount: number;
+  requiresReconnect: boolean;
   usage: UsageSummary | null;
 };
 
@@ -79,6 +81,7 @@ export type LimitRefreshJob = {
 
 export type OauthFlowStartResponse = {
   flowId: string;
+  intent: "add" | "reconnect";
   alias: string;
   authorizationUrl: string;
   status: "pending" | "success" | "error";

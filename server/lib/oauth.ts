@@ -8,10 +8,13 @@ import {
   OPENAI_OAUTH_SCOPE,
 } from "./config.js";
 
+export type OauthFlowIntent = "add" | "reconnect";
+
 type OauthFlowStatus = "pending" | "success" | "error";
 
 type OauthFlowRecord = {
   id: string;
+  intent: OauthFlowIntent;
   alias: string;
   state: string;
   codeVerifier: string;
@@ -59,6 +62,7 @@ function pruneExpiredFlows() {
 function toPublicFlow(flow: OauthFlowRecord) {
   return {
     flowId: flow.id,
+    intent: flow.intent,
     alias: flow.alias,
     authorizationUrl: flow.authorizationUrl,
     status: flow.status,
@@ -72,7 +76,7 @@ function toPublicFlow(flow: OauthFlowRecord) {
   };
 }
 
-export function startOauthFlow(alias: string) {
+export function startOauthFlow(options: { alias: string; intent: OauthFlowIntent }) {
   pruneExpiredFlows();
 
   const flowId = crypto.randomUUID();
@@ -96,7 +100,8 @@ export function startOauthFlow(alias: string) {
 
   const flow: OauthFlowRecord = {
     id: flowId,
-    alias,
+    intent: options.intent,
+    alias: options.alias,
     state,
     codeVerifier: verifier,
     redirectUri,
@@ -148,6 +153,7 @@ export function markOauthFlowSuccess(
 ) {
   const flow = flowsById.get(flowId);
   if (!flow) return null;
+  if (flow.status !== "pending") return toPublicFlow(flow);
 
   flow.status = "success";
   flow.completedAt = new Date().toISOString();
@@ -162,6 +168,7 @@ export function markOauthFlowSuccess(
 export function markOauthFlowError(flowId: string, error: string) {
   const flow = flowsById.get(flowId);
   if (!flow) return null;
+  if (flow.status !== "pending") return toPublicFlow(flow);
 
   flow.status = "error";
   flow.completedAt = new Date().toISOString();

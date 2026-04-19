@@ -22,6 +22,8 @@ export type CreditsRecord = {
   approxCloudMessages: number | null;
 };
 
+export type UsageAuthState = "valid" | "unknown" | "reconnect-required";
+
 export type UsageRecord = {
   planType: string | null;
   rateLimit: RateLimitRecord | null;
@@ -29,6 +31,7 @@ export type UsageRecord = {
   credits: CreditsRecord | null;
   fetchedAt: string | null;
   error: string | null;
+  authState: UsageAuthState;
 };
 
 export type StoredAccount = {
