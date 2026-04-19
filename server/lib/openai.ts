@@ -21,6 +21,22 @@ type RawWindow = {
   reset_at?: number | null;
 };
 
+export class OpenAiRequestError extends Error {
+  operation: "usage" | "token-refresh" | "oauth-exchange";
+  status: number;
+
+  constructor(
+    operation: "usage" | "token-refresh" | "oauth-exchange",
+    status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "OpenAiRequestError";
+    this.operation = operation;
+    this.status = status;
+  }
+}
+
 function decodeJwtPayload(token: string) {
   try {
     const parts = token.split(".");
@@ -171,7 +187,9 @@ export async function exchangeAuthorizationCode({
 
   const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
   if (!response.ok || !payload) {
-    throw new Error(
+    throw new OpenAiRequestError(
+      "oauth-exchange",
+      response.status,
       `OAuth token exchange failed (${response.status})${payload && typeof payload.error_description === "string" ? `: ${payload.error_description}` : ""}`,
     );
   }
@@ -220,7 +238,9 @@ export async function refreshStoredAccount(account: StoredAccount) {
 
   const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
   if (!response.ok || !payload) {
-    throw new Error(
+    throw new OpenAiRequestError(
+      "token-refresh",
+      response.status,
       `Token refresh failed (${response.status})${payload && typeof payload.error_description === "string" ? `: ${payload.error_description}` : ""}`,
     );
   }
@@ -270,7 +290,7 @@ export async function fetchUsageForAccount(account: StoredAccount): Promise<Usag
   const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
 
   if (!response.ok || !payload) {
-    throw new Error(`Usage request failed (${response.status})`);
+    throw new OpenAiRequestError("usage", response.status, `Usage request failed (${response.status})`);
   }
 
   const nowIso = new Date().toISOString();
@@ -281,5 +301,6 @@ export async function fetchUsageForAccount(account: StoredAccount): Promise<Usag
     credits: mapCredits(payload.credits),
     fetchedAt: nowIso,
     error: null,
+    authState: "valid",
   };
 }

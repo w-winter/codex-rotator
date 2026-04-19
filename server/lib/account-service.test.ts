@@ -13,6 +13,7 @@ const {
   AccountServiceError,
   activateAccountOnDevice,
   readRotationPolicy,
+  reconnectStoredAccount,
   refreshAccountLimits,
   rotateAccountOnDevice,
   syncCurrentDeviceAuth,
@@ -165,7 +166,12 @@ test("refreshAccountLimits aggregates failures instead of throwing per-account u
   assert.match(failedAccount?.usage?.error ?? "", /Usage request failed/);
 });
 
-function makeUsage(primaryPercent: number, weeklyPercent: number, error: string | null = null) {
+function makeUsage(
+  primaryPercent: number,
+  weeklyPercent: number,
+  error: string | null = null,
+  authState: "valid" | "unknown" | "reconnect-required" = error == null ? "valid" : "unknown",
+) {
   return {
     planType: "pro",
     rateLimit:
@@ -191,6 +197,7 @@ function makeUsage(primaryPercent: number, weeklyPercent: number, error: string 
     credits: null,
     fetchedAt: "2026-01-01T00:00:00.000Z",
     error,
+    authState,
   };
 }
 
@@ -237,6 +244,92 @@ test("rotateAccountOnDevice keeps the current account when no healthy alternativ
   assert.equal(result.reason, "keep-current");
   assert.equal(currentAuth.accountId, "account-1");
   assert.equal(current?.usageCount, 0);
+});
+
+test("reconnectStoredAccount updates the same alias and clears a 401 refresh failure", async () => {
+  const staleAuth = makeAuthBundle("account-1", "first@example.com", "pro");
+  const account = buildStoredAccount(staleAuth, "acc1");
+  account.usage = makeUsage(0, 0, "Token refresh failed (401)", "reconnect-required");
+  await saveStore(makeStore([account]));
+
+  globalThis.fetch = async (_input, init) => {
+    assert.equal(new Headers(init?.headers).get("ChatGPT-Account-Id"), "account-1");
+    return jsonResponse(200, {
+      plan_type: "team",
+      rate_limit: { allowed: true, limit_reached: false },
+      code_review_rate_limit: { allowed: true, limit_reached: false },
+      credits: { has_credits: true, unlimited: false, balance: "5" },
+    });
+  };
+
+  const refreshedAuth = makeAuthBundle("account-1", "first@example.com", "team");
+  const result = await reconnectStoredAccount({ alias: "acc1", auth: refreshedAuth });
+  const store = await loadStore();
+  const stored = store.accounts.find((item) => item.alias === "acc1");
+
+  assert.equal(result.created, false);
+  assert.equal(result.alias, "acc1");
+  assert.equal(stored?.planType, "team");
+  assert.equal(stored?.usage?.error, null);
+  assert.equal(stored?.usage?.authState, "valid");
+  assert.equal(stored?.accountId, "account-1");
+});
+
+test("reconnectStoredAccount rejects an email-only match when canonical account identity is missing", async () => {
+  const account = buildStoredAccount(makeAuthBundle("account-1", "first@example.com"), "acc1");
+  account.accountId = null;
+  await saveStore(makeStore([account]));
+
+  await assert.rejects(
+    reconnectStoredAccount({ alias: "acc1", auth: makeAuthBundle("account-2", "first@example.com") }),
+    (error: unknown) => {
+      assert.equal(error instanceof AccountServiceError, true);
+      assert.equal((error as { code?: string }).code, "REAUTH_ACCOUNT_MISMATCH");
+      assert.match(String((error as Error).message), /did not match stored account 'acc1'/);
+      return true;
+    },
+  );
+});
+
+test("reconnectStoredAccount rejects an OAuth login for a different stored alias", async () => {
+  const first = buildStoredAccount(makeAuthBundle("account-1", "first@example.com"), "acc1");
+  const second = buildStoredAccount(makeAuthBundle("account-2", "second@example.com"), "acc2");
+  await saveStore(makeStore([first, second]));
+
+  await assert.rejects(
+    reconnectStoredAccount({ alias: "acc1", auth: makeAuthBundle("account-2", "second@example.com") }),
+    (error: unknown) => {
+      assert.equal(error instanceof AccountServiceError, true);
+      assert.equal((error as { code?: string }).code, "REAUTH_ACCOUNT_MISMATCH");
+      assert.match(String((error as Error).message), /matched stored account 'acc2'/);
+      return true;
+    },
+  );
+});
+
+test("refreshAccountLimits marks reconnect-required after token refresh 401 failure", async () => {
+  const account = buildStoredAccount(makeAuthBundle("account-1", "first@example.com"), "acc1");
+  await saveStore(makeStore([account]));
+
+  globalThis.fetch = async (input, init) => {
+    if (String(input) === "https://chatgpt.com/backend-api/wham/usage") {
+      return jsonResponse(401, { error: "expired" });
+    }
+
+    if (String(input) === "https://auth.openai.com/oauth/token") {
+      return jsonResponse(401, { error_description: "expired refresh" });
+    }
+
+    throw new Error(`Unexpected fetch call: ${String(input)} ${JSON.stringify(init)}`);
+  };
+
+  const result = await refreshAccountLimits({ alias: "acc1" });
+  const store = await loadStore();
+  const stored = store.accounts.find((item) => item.alias === "acc1");
+
+  assert.equal(result.failed, 1);
+  assert.equal(stored?.usage?.authState, "reconnect-required");
+  assert.match(stored?.usage?.error ?? "", /Token refresh failed \(401\)/);
 });
 
 test("updateRotationPolicy persists preferred and reserve aliases", async () => {

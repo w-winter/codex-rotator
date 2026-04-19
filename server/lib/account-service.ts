@@ -1,16 +1,18 @@
 import { readCurrentAuthFile, writeCurrentAuthFile } from "./auth-file.js";
 import {
   getMatchingAccount,
+  matchesCanonicalAccountIdentity,
   nextAlias,
   normalizeAlias,
   rotationPolicyAliases,
   selectRotationTarget,
+  syncStoredAccount,
   upsertAccount,
 } from "./accounts.js";
 import { MAX_PARALLEL_ACCOUNT_REFRESH } from "./config.js";
 import { toDashboardState } from "./dashboard-state.js";
 import { MutationLockBusyError, withMutationLock } from "./mutation-lock.js";
-import { fetchUsageForAccount, refreshStoredAccount } from "./openai.js";
+import { OpenAiRequestError, fetchUsageForAccount, refreshStoredAccount } from "./openai.js";
 import { createDefaultRotationPolicy, loadStore, saveStore } from "./store.js";
 import type { ExtractedAuth, RotationPolicy, StoredAccount, StoreFile, UsageRecord } from "./types.js";
 
@@ -20,7 +22,8 @@ export type AccountServiceErrorCode =
   | "ALIAS_CONFLICT"
   | "ACCOUNT_NOT_FOUND"
   | "NO_MATCHING_ACCOUNTS"
-  | "OPERATION_IN_PROGRESS";
+  | "OPERATION_IN_PROGRESS"
+  | "REAUTH_ACCOUNT_MISMATCH";
 
 export class AccountServiceError extends Error {
   code: AccountServiceErrorCode;
@@ -129,7 +132,11 @@ async function withServiceMutationLock<T>(label: string, task: () => Promise<T>)
   }
 }
 
-function buildFailedUsage(account: StoredAccount, message: string): UsageRecord {
+function buildFailedUsage(
+  account: StoredAccount,
+  message: string,
+  authState: UsageRecord["authState"],
+): UsageRecord {
   return {
     planType: account.planType,
     rateLimit: account.usage?.rateLimit ?? null,
@@ -137,6 +144,7 @@ function buildFailedUsage(account: StoredAccount, message: string): UsageRecord 
     credits: account.usage?.credits ?? null,
     fetchedAt: new Date().toISOString(),
     error: message,
+    authState,
   };
 }
 
@@ -152,7 +160,10 @@ async function refreshUsageWithAutoTokenRefresh(account: StoredAccount): Promise
     return { ok: true, message: null };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Usage refresh failed";
-    const shouldRetry = message.includes("(401)") || message.includes("(403)");
+    const shouldRetry =
+      error instanceof OpenAiRequestError
+      && error.operation === "usage"
+      && (error.status === 401 || error.status === 403);
 
     if (shouldRetry) {
       try {
@@ -162,12 +173,18 @@ async function refreshUsageWithAutoTokenRefresh(account: StoredAccount): Promise
       } catch (retryError) {
         const retryMessage =
           retryError instanceof Error ? retryError.message : "Usage refresh failed after token refresh";
-        applyUsage(account, buildFailedUsage(account, retryMessage));
+        const authState =
+          retryError instanceof OpenAiRequestError
+          && retryError.operation === "token-refresh"
+          && (retryError.status === 401 || retryError.status === 403)
+            ? "reconnect-required"
+            : "unknown";
+        applyUsage(account, buildFailedUsage(account, retryMessage, authState));
         return { ok: false, message: retryMessage };
       }
     }
 
-    applyUsage(account, buildFailedUsage(account, message));
+    applyUsage(account, buildFailedUsage(account, message, "unknown"));
     return { ok: false, message };
   }
 }
@@ -328,6 +345,49 @@ export async function storeExtractedAccount(options: {
       created: result.created,
       alias: result.alias,
       matchReason: result.matchReason,
+    };
+  });
+}
+
+export async function reconnectStoredAccount(options: { alias: string; auth: ExtractedAuth }) {
+  const alias = requireAlias(options.alias);
+
+  return withServiceMutationLock(`reconnect-account:${alias}`, async () => {
+    const store = await loadStore();
+    const account = findAccountByAlias(store, alias);
+    const match = getMatchingAccount(
+      store,
+      options.auth.fingerprint,
+      options.auth.email,
+      options.auth.accountId,
+      options.auth.planType,
+    );
+
+    if (match && match.account.alias !== alias) {
+      throw new AccountServiceError(
+        "REAUTH_ACCOUNT_MISMATCH",
+        `OAuth login matched stored account '${match.account.alias}', not '${alias}'. Use Add account if you intended a different account.`,
+      );
+    }
+
+    if (!matchesCanonicalAccountIdentity(account, options.auth)) {
+      throw new AccountServiceError(
+        "REAUTH_ACCOUNT_MISMATCH",
+        `The OAuth login did not match stored account '${alias}'. Use Add account if you intended a different account.`,
+      );
+    }
+
+    syncStoredAccount(account, options.auth, account.alias);
+    store.lastSyncedAt = account.lastSyncedAt;
+    await refreshUsageWithAutoTokenRefresh(account);
+    await saveStore(store);
+
+    return {
+      store,
+      account,
+      alias: account.alias,
+      created: false,
+      matchReason: match?.reason ?? null,
     };
   });
 }

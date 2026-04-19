@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  accountRequiresReconnect,
   getMatchingAccount,
+  matchesCanonicalAccountIdentity,
   normalizeAlias,
   recommendedAlias,
   selectRotationTarget,
@@ -14,9 +16,9 @@ function makeAccount(overrides: Partial<StoredAccount>): StoredAccount {
   return {
     alias: overrides.alias ?? "acc1",
     fingerprint: overrides.fingerprint ?? "fingerprint-1",
-    email: overrides.email ?? "person@example.com",
-    accountId: overrides.accountId ?? "account-1",
-    planType: overrides.planType ?? "pro",
+    email: overrides.email === undefined ? "person@example.com" : overrides.email,
+    accountId: overrides.accountId === undefined ? "account-1" : overrides.accountId,
+    planType: overrides.planType === undefined ? "pro" : overrides.planType,
     tokenExpiresAt: overrides.tokenExpiresAt ?? null,
     lastSyncedAt: overrides.lastSyncedAt ?? "2026-01-01T00:00:00.000Z",
     lastTokenRefreshAt: overrides.lastTokenRefreshAt ?? null,
@@ -48,9 +50,9 @@ function makeAuth(overrides: Partial<ExtractedAuth>): ExtractedAuth {
   return {
     rawAuth: overrides.rawAuth ?? { tokens: {} },
     fingerprint: overrides.fingerprint ?? "incoming-fingerprint",
-    email: overrides.email ?? "person@example.com",
-    accountId: overrides.accountId ?? "account-1",
-    planType: overrides.planType ?? "pro",
+    email: overrides.email === undefined ? "person@example.com" : overrides.email,
+    accountId: overrides.accountId === undefined ? "account-1" : overrides.accountId,
+    planType: overrides.planType === undefined ? "pro" : overrides.planType,
     tokenExpiresAt: overrides.tokenExpiresAt ?? null,
     accessToken: overrides.accessToken ?? "access",
     refreshToken: overrides.refreshToken ?? "refresh",
@@ -59,6 +61,8 @@ function makeAuth(overrides: Partial<ExtractedAuth>): ExtractedAuth {
 }
 
 function makeUsage(overrides: Partial<UsageRecord> & { primaryPercent?: number; weeklyPercent?: number }): UsageRecord {
+  const error = overrides.error ?? null;
+
   return {
     planType: overrides.planType ?? "pro",
     rateLimit:
@@ -83,7 +87,8 @@ function makeUsage(overrides: Partial<UsageRecord> & { primaryPercent?: number; 
     codeReviewRateLimit: overrides.codeReviewRateLimit ?? null,
     credits: overrides.credits ?? null,
     fetchedAt: overrides.fetchedAt ?? "2026-01-01T00:00:00.000Z",
-    error: overrides.error ?? null,
+    error,
+    authState: overrides.authState ?? (error == null ? "valid" : "unknown"),
   };
 }
 
@@ -134,6 +139,80 @@ test("upsertAccount keeps same-accountId different-email accounts separate", () 
   assert.equal(result.created, true);
   assert.equal(result.alias, "acc2");
   assert.equal(store.accounts.length, 2);
+});
+
+test("matchesCanonicalAccountIdentity accepts same accountId when plan changes", () => {
+  const account = makeAccount({
+    alias: "acc1",
+    accountId: "shared-account",
+    email: "person@example.com",
+    planType: "pro",
+  });
+
+  assert.equal(
+    matchesCanonicalAccountIdentity(
+      account,
+      makeAuth({
+        accountId: "shared-account",
+        email: "person@example.com",
+        planType: "team",
+      }),
+    ),
+    true,
+  );
+});
+
+test("matchesCanonicalAccountIdentity rejects reconnect when canonical accountId is missing", () => {
+  const account = makeAccount({
+    alias: "acc1",
+    accountId: null,
+    email: "person@example.com",
+  });
+
+  assert.equal(
+    matchesCanonicalAccountIdentity(
+      account,
+      makeAuth({
+        accountId: "shared-account",
+        email: "person@example.com",
+      }),
+    ),
+    false,
+  );
+});
+
+test("matchesCanonicalAccountIdentity rejects a different account", () => {
+  const account = makeAccount({
+    alias: "acc1",
+    accountId: "account-1",
+    email: "first@example.com",
+  });
+
+  assert.equal(
+    matchesCanonicalAccountIdentity(
+      account,
+      makeAuth({
+        accountId: "account-2",
+        email: "second@example.com",
+      }),
+    ),
+    false,
+  );
+});
+
+test("accountRequiresReconnect uses structured auth state instead of parsing error text", () => {
+  assert.equal(
+    accountRequiresReconnect(makeAccount({ usage: makeUsage({ error: "anything", authState: "reconnect-required" }) })),
+    true,
+  );
+  assert.equal(
+    accountRequiresReconnect(makeAccount({ usage: makeUsage({ error: "Token refresh failed (401)", authState: "unknown" }) })),
+    false,
+  );
+  assert.equal(
+    accountRequiresReconnect(makeAccount({ usage: makeUsage({ error: null, authState: "valid" }) })),
+    false,
+  );
 });
 
 test("selectRotationTarget prefers the healthiest non-current account", () => {

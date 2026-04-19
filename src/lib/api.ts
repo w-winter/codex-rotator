@@ -127,6 +127,13 @@ export function startOauthAccount(alias?: string) {
   });
 }
 
+export function startOauthReconnect(alias: string) {
+  return request<OauthFlowStartResponse>("/api/oauth/reconnect", {
+    method: "POST",
+    body: JSON.stringify({ alias }),
+  });
+}
+
 export function fetchOauthStatus(flowId: string) {
   return request<OauthFlowStatusResponse>(`/api/oauth/status/${flowId}`);
 }

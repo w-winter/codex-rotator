@@ -13,6 +13,7 @@ import {
   refreshAccountTokens,
   startBulkLimitRefresh,
   startOauthAccount,
+  startOauthReconnect,
   syncCurrentAccount,
 } from "@/lib/api";
 import { IS_TAURI } from "@/lib/env";
@@ -36,6 +37,10 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+
+type OauthFlowRequest =
+  | { intent: "add"; alias?: string }
+  | { intent: "reconnect"; alias: string };
 
 function formatDateTime(value: string | null) {
   if (!value) return "Unknown";
@@ -346,15 +351,19 @@ function UsageDetailPanel({
 function AccountAccordion({
   account,
   onActivate,
+  onReconnect,
   onRefreshTokens,
   onRefreshLimits,
   onDelete,
+  oauthBusy,
 }: {
   account: AccountSummary;
   onActivate: (alias: string) => void;
+  onReconnect: (alias: string) => void;
   onRefreshTokens: (alias: string) => void;
   onRefreshLimits: (alias: string) => void;
   onDelete: (alias: string) => void;
+  oauthBusy: boolean;
 }) {
   const primaryWindow = account.usage?.rateLimit?.primaryWindow ?? null;
   const weeklyWindow = account.usage?.rateLimit?.secondaryWindow ?? null;
@@ -364,6 +373,7 @@ function AccountAccordion({
     : null;
   const ready = isAccountReady(account);
   const needsRefresh = account.usage?.error != null;
+  const reconnectRequired = account.requiresReconnect;
   const weeklyExhausted = isWindowExhausted(weeklyWindow);
   const primaryExhausted = isWindowExhausted(primaryWindow);
   const primaryResetTime = primaryExhausted ? formatResetTime(primaryWindow) : null;
@@ -405,8 +415,8 @@ function AccountAccordion({
               <Badge variant="outline">{formatPlanType(account.planType)}</Badge>
               {account.onDevice ? <Badge variant="success">Active in Codex</Badge> : null}
               {account.recommended ? <Badge variant="accent">Recommended</Badge> : null}
-              <Badge variant={needsRefresh ? "warning" : ready ? "success" : "secondary"}>
-                {needsRefresh ? "Needs refresh" : ready ? "Ready" : "Pending limits"}
+              <Badge variant={reconnectRequired || needsRefresh ? "warning" : ready ? "success" : "secondary"}>
+                {reconnectRequired ? "Reconnect required" : needsRefresh ? "Needs refresh" : ready ? "Ready" : "Pending limits"}
               </Badge>
               {weeklyExhausted ? (
                 <Badge variant="destructive">Weekly exhausted · Unusable</Badge>
@@ -444,7 +454,12 @@ function AccountAccordion({
         <div className="flex flex-col">
           {account.usage?.error ? (
             <div className="rounded-xl border border-warning/40 bg-warning/10 px-3 py-3 text-sm leading-relaxed text-warning-foreground">
-              {account.usage.error}
+              <div>{account.usage.error}</div>
+              {reconnectRequired ? (
+                <div className="mt-2 text-warning-foreground/80">
+                  Use Reconnect to refresh the stored login for this alias.
+                </div>
+              ) : null}
             </div>
           ) : account.usage == null ? (
             <div className="rounded-xl border border-border/50 bg-background px-3 py-3 text-sm leading-relaxed text-muted-foreground">
@@ -486,9 +501,19 @@ function AccountAccordion({
 
           <div className="flex flex-wrap items-center gap-2">
             <Button onClick={() => onActivate(account.alias)}>Use on device</Button>
-            <Button variant="mutedBordered" onClick={() => onRefreshTokens(account.alias)}>
-              Refresh token
-            </Button>
+            {reconnectRequired ? (
+              <Button
+                variant="mutedBordered"
+                onClick={() => onReconnect(account.alias)}
+                disabled={oauthBusy}
+              >
+                Reconnect
+              </Button>
+            ) : (
+              <Button variant="mutedBordered" onClick={() => onRefreshTokens(account.alias)}>
+                Refresh token
+              </Button>
+            )}
             <Button variant="mutedBordered" onClick={() => onRefreshLimits(account.alias)}>
               Refresh limits
             </Button>
@@ -896,27 +921,32 @@ export function AccountsPage() {
   });
 
   const oauthMutation = useMutation({
-    mutationFn: (alias?: string) => startOauthAccount(alias),
+    mutationFn: (request: OauthFlowRequest) => {
+      return request.intent === "reconnect"
+        ? startOauthReconnect(request.alias)
+        : startOauthAccount(request.alias);
+    },
     onSuccess: async (flow) => {
       setOauthFlow(flow);
       const popup = oauthPopupRef.current;
+      const actionLabel = flow.intent === "reconnect" ? "reconnect" : "login";
 
       if (IS_TAURI) {
         const { openUrl } = await import("@tauri-apps/plugin-opener");
         await openUrl(flow.authorizationUrl);
-        toast.message(`Continue the OpenAI login for ${flow.alias} in your browser, then return here.`);
+        toast.message(`Continue the OpenAI ${actionLabel} for ${flow.alias} in your browser, then return here.`);
         return;
       }
 
       if (!popup || popup.closed) {
         window.open(flow.authorizationUrl, "_blank", "popup=yes,width=540,height=760");
-        toast.message(`Continue the OpenAI login for ${flow.alias}.`);
+        toast.message(`Continue the OpenAI ${actionLabel} for ${flow.alias}.`);
         return;
       }
 
       popup.location.replace(flow.authorizationUrl);
       popup.focus();
-      toast.message(`Continue the OpenAI login for ${flow.alias}.`);
+      toast.message(`Continue the OpenAI ${actionLabel} for ${flow.alias}.`);
     },
     onError: (error) => {
       oauthPopupRef.current?.close();
@@ -975,7 +1005,9 @@ export function AccountsPage() {
 
     if (oauthStatusQuery.data.status === "success") {
       const storedAlias = oauthStatusQuery.data.accountAlias ?? oauthFlow.alias;
-      if (oauthStatusQuery.data.created === false) {
+      if (oauthFlow.intent === "reconnect") {
+        toast.success(`Reconnected ${storedAlias}`);
+      } else if (oauthStatusQuery.data.created === false) {
         toast.message("No new account was added", {
           description:
             oauthStatusQuery.data.email != null
@@ -987,6 +1019,7 @@ export function AccountsPage() {
       }
       setPendingAlias("");
       setOauthFlow(null);
+      oauthPopupRef.current?.close();
       oauthPopupRef.current = null;
       queryClient.invalidateQueries({ queryKey: ["dashboard-state"] });
       return;
@@ -995,6 +1028,7 @@ export function AccountsPage() {
     if (oauthStatusQuery.data.status === "error") {
       toast.error(oauthStatusQuery.data.error || "OAuth flow failed");
       setOauthFlow(null);
+      oauthPopupRef.current?.close();
       oauthPopupRef.current = null;
     }
   }, [oauthFlow, oauthStatusQuery.data, queryClient]);
@@ -1036,9 +1070,9 @@ export function AccountsPage() {
     });
   }, [search, stateQuery.data]);
 
-  function handleStartOauth() {
+  function beginOauthFlow(request: OauthFlowRequest) {
     if (IS_TAURI) {
-      oauthMutation.mutate(pendingAlias || undefined);
+      oauthMutation.mutate(request);
       return;
     }
 
@@ -1057,7 +1091,7 @@ export function AccountsPage() {
           <div style="max-width:360px;width:100%;border:1px solid #e2e8f0;border-radius:24px;background:#ffffff;padding:28px;">
             <div style="font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:#64748b;">Codex usage dashboard</div>
             <h1 style="margin:16px 0 10px;font-size:28px;line-height:1.1;">Preparing login</h1>
-            <p style="margin:0;color:#475569;font-size:15px;line-height:1.6;">Your OpenAI account window is being opened for the next stored session.</p>
+            <p style="margin:0;color:#475569;font-size:15px;line-height:1.6;">Your OpenAI account window is being opened.</p>
           </div>
         </div>
       `;
@@ -1066,7 +1100,15 @@ export function AccountsPage() {
     }
 
     oauthPopupRef.current = popup;
-    oauthMutation.mutate(pendingAlias || undefined);
+    oauthMutation.mutate(request);
+  }
+
+  function handleStartOauth() {
+    beginOauthFlow({ intent: "add", alias: pendingAlias || undefined });
+  }
+
+  function handleReconnect(alias: string) {
+    beginOauthFlow({ intent: "reconnect", alias });
   }
 
   return (
@@ -1161,8 +1203,17 @@ export function AccountsPage() {
 
         {oauthFlow ? (
           <div className="rounded-xl bg-muted/50 px-4 py-3 text-sm leading-relaxed text-muted-foreground">
-            OAuth login in progress for <span className="font-medium text-foreground">{oauthFlow.alias}</span>.
-            Finish the browser login, then this page will pick the account up automatically.
+            {oauthFlow.intent === "reconnect" ? (
+              <>
+                Reconnect in progress for <span className="font-medium text-foreground">{oauthFlow.alias}</span>.
+                Finish the browser login to refresh that stored account.
+              </>
+            ) : (
+              <>
+                OAuth login in progress for <span className="font-medium text-foreground">{oauthFlow.alias}</span>.
+                Finish the browser login, then this page will pick the account up automatically.
+              </>
+            )}
           </div>
         ) : null}
 
@@ -1178,9 +1229,11 @@ export function AccountsPage() {
               key={account.alias}
               account={account}
               onActivate={(alias) => activateMutation.mutate(alias)}
+              onReconnect={handleReconnect}
               onRefreshTokens={(alias) => refreshTokensMutation.mutate(alias)}
               onRefreshLimits={(alias) => refreshLimitsMutation.mutate(alias)}
               onDelete={(alias) => deleteMutation.mutate(alias)}
+              oauthBusy={oauthMutation.isPending || Boolean(oauthFlow)}
             />
           ))}
         </div>

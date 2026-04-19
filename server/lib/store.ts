@@ -10,7 +10,14 @@ import {
   KEY_PATH,
   STORE_PATH,
 } from "./config.js";
-import type { RotationPolicy, StoreFile } from "./types.js";
+import type {
+  RawAuthJson,
+  RotationPolicy,
+  StoreFile,
+  StoredAccount,
+  UsageAuthState,
+  UsageRecord,
+} from "./types.js";
 
 type EncryptedPayload = {
   version: number;
@@ -73,6 +80,60 @@ function normalizeRotationPolicy(input: unknown): RotationPolicy {
   };
 }
 
+function normalizeAuthState(error: string | null, value: unknown): UsageAuthState {
+  if (value === "valid" || value === "unknown" || value === "reconnect-required") {
+    return value;
+  }
+
+  return error == null ? "valid" : "unknown";
+}
+
+function normalizeUsageRecord(input: unknown): UsageRecord | null {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return null;
+  }
+
+  const candidate = input as Partial<UsageRecord>;
+  const error = typeof candidate.error === "string" ? candidate.error : null;
+
+  return {
+    planType: typeof candidate.planType === "string" ? candidate.planType : null,
+    rateLimit: candidate.rateLimit ?? null,
+    codeReviewRateLimit: candidate.codeReviewRateLimit ?? null,
+    credits: candidate.credits ?? null,
+    fetchedAt: typeof candidate.fetchedAt === "string" ? candidate.fetchedAt : null,
+    error,
+    authState: normalizeAuthState(error, candidate.authState),
+  };
+}
+
+function normalizeStoredAccount(input: unknown): StoredAccount | null {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return null;
+  }
+
+  const candidate = input as Partial<StoredAccount>;
+
+  return {
+    alias: typeof candidate.alias === "string" ? candidate.alias : "",
+    fingerprint: typeof candidate.fingerprint === "string" ? candidate.fingerprint : "",
+    email: typeof candidate.email === "string" ? candidate.email : null,
+    accountId: typeof candidate.accountId === "string" ? candidate.accountId : null,
+    planType: typeof candidate.planType === "string" ? candidate.planType : null,
+    tokenExpiresAt: typeof candidate.tokenExpiresAt === "string" ? candidate.tokenExpiresAt : null,
+    lastSyncedAt: typeof candidate.lastSyncedAt === "string" ? candidate.lastSyncedAt : new Date(0).toISOString(),
+    lastTokenRefreshAt: typeof candidate.lastTokenRefreshAt === "string" ? candidate.lastTokenRefreshAt : null,
+    lastLimitRefreshAt: typeof candidate.lastLimitRefreshAt === "string" ? candidate.lastLimitRefreshAt : null,
+    usageCount: typeof candidate.usageCount === "number" && Number.isFinite(candidate.usageCount)
+      ? candidate.usageCount
+      : 0,
+    rawAuth: candidate.rawAuth && typeof candidate.rawAuth === "object" && !Array.isArray(candidate.rawAuth)
+      ? candidate.rawAuth as RawAuthJson
+      : {},
+    usage: normalizeUsageRecord(candidate.usage),
+  };
+}
+
 function normalizeStore(input: unknown): StoreFile {
   const defaults = createEmptyStore();
   const candidate = input && typeof input === "object" ? (input as Partial<StoreFile>) : null;
@@ -90,7 +151,11 @@ function normalizeStore(input: unknown): StoreFile {
     },
     rotationPolicy: normalizeRotationPolicy(candidate?.rotationPolicy),
     lastSyncedAt: typeof candidate?.lastSyncedAt === "string" ? candidate.lastSyncedAt : null,
-    accounts: Array.isArray(candidate?.accounts) ? candidate.accounts : defaults.accounts,
+    accounts: Array.isArray(candidate?.accounts)
+      ? candidate.accounts
+        .map((account) => normalizeStoredAccount(account))
+        .filter((account): account is StoredAccount => account != null && account.alias.length > 0)
+      : defaults.accounts,
   };
 }
 
